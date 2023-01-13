@@ -1,0 +1,201 @@
+dist: xenial
+os: linux
+language: shell
+
+stages:
+  - name: 'Build'
+
+before_install:
+  - echo "//registry.npmjs.org/:_authToken=\${NPM_TOKEN}" > .npmrc
+  - echo -e "machine github.com\n  login hk01bot\n  password ${CI_USER_PASSWORD}" >> ~/.netrc
+  - chmod 600 ~/.netrc
+
+default_ios: &default_ios
+
+  language: objective-c
+  podfile: ./ios/Podfile
+
+  os: osx
+  osx_image: xcode14
+
+  cache:
+    yarn: true
+    bundler: true
+    directories:
+      - $HOME/.rvm/
+      - $HOME/Library/Caches/CocoaPods
+
+  install:
+    - rvm reload
+    - rvm install ruby-2.7.4
+    - rvm use 2.7.4
+    - nvm install 14
+    - npm install --global yarn
+    - export PATH="$HOME/.yarn/bin:$HOME/.config/yarn/global/node_modules/.bin:$PATH"
+    - travis_retry yarn install --frozen-lockfile --production
+    - bundle install
+
+default_android: &default_android
+
+  addons:
+    apt:
+      sources:
+        - sourceline: 'deb http://old-releases.ubuntu.com/ubuntu yakkety main universe multiverse'
+      packages:
+        - openssh-server
+        - openssh-client
+      update: true
+
+  language: android
+  sudo: required
+
+  android:
+    components:
+      # The BuildTools version used by your project
+      - build-tools-31.0.0
+
+      # The SDK version used to compile your project
+      - android-31
+
+  before_cache:
+    - rm -f $HOME/.gradle/caches/jars-3/jars-3.lock
+    - rm -f $HOME/.gradle/caches/modules-2/modules-2.lock
+  cache:
+    yarn: true
+    bundler: true
+
+  install:
+    - echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p
+    - rvm install ruby-2.7.4
+    - rvm use 2.7.4
+    - nvm install 14
+    - npm install --global yarn
+    - export PATH="$HOME/.yarn/bin:$HOME/.config/yarn/global/node_modules/.bin:$PATH"
+    - travis_retry yarn install --frozen-lockfile --production
+    - bundle install
+    - mkdir -p "${ANDROID_HOME}/licenses"
+    - echo -en "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "${ANDROID_HOME}/licenses/android-sdk-license"
+    - echo "${SUPPLY_JSON_KEY_BASE64}" | base64 -d > fastlane/service-account.json
+    - curl -s "https://get.sdkman.io" | bash
+    - source "$HOME/.sdkman/bin/sdkman-init.sh"
+    - sdk install java 17.0.2-open
+    - sdk use java 17.0.2-open
+
+jobs:
+  include:
+    - stage: 'Build'
+      name: 'Sanity Check'
+      if: branch =~ ^release|^development$ OR type == pull_request
+      cache:
+        yarn: true
+      install:
+        - nvm install 14
+        - npm install --global yarn
+        - export PATH="$HOME/.yarn/bin:$HOME/.config/yarn/global/node_modules/.bin:$PATH"
+        - travis_retry yarn install --frozen-lockfile
+      script:
+        - yarn lint
+        - yarn test
+        - yarn flow
+        - yarn typecheck
+        - yarn danger ci
+
+    - stage: 'Build'
+      name: 'iOS App Store Build'
+      if: branch =~ ^release AND type != pull_request
+
+      <<: *default_ios
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane ios release
+
+    - stage: 'Build'
+      name: 'Android Google Play Store Build'
+      if: branch =~ ^release AND type != pull_request
+      <<: *default_android
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane android release
+
+    - stage: 'Build'
+      name: 'iOS Production Build with Ad Hoc Provisioning Profile'
+      if: branch =~ ^release OR commit_message =~ /\[build adhoc\]/
+      <<: *default_ios
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane ios adhoc
+
+    - stage: 'Build'
+      name: 'iOS Production Build with Universal Distribution Provisioning Profile'
+      if: branch =~ ^release OR (branch =~ ^development$ AND type != pull_request) OR commit_message =~ /\[build production\]/
+      <<: *default_ios
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane ios prd
+
+    - stage: 'Build'
+      name: 'Android Production Build'
+      if: branch =~ ^release OR (branch =~ ^development$ AND type != pull_request) OR commit_message =~ /\[build production\]/
+      <<: *default_android
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane android prd
+
+    - stage: 'Build'
+      name: 'iOS Staging Build with Universal Distribution Provisioning Profile'
+      if: branch =~ ^release|^development$ OR commit_message =~ /\[build staging\]/
+      <<: *default_ios
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane ios stg
+
+    - stage: 'Build'
+      name: 'Android Staging Build'
+      if: branch =~ ^release|^development$ OR commit_message =~ /\[build staging\]/
+      <<: *default_android
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane android stg
+
+    - stage: 'Build'
+      name: 'iOS Sign In With Apple Staging Build with Ad Hoc Provisioning Profile'
+      if: branch =~ ^release OR commit_message =~ /\[build siwa\]/
+      <<: *default_ios
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane ios siwa
+
+    - stage: 'Build'
+      name: 'Android App Gallery Build'
+      if: branch =~ ^release AND type != pull_request OR commit_message ~= /\[build appgallery\]/
+      <<: *default_android
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane android release store:appgallery
+
+
+    - stage: 'Build'
+      name: 'Android Samsung Build'
+      if: branch =~ ^release AND type != pull_request OR commit_message ~= /\[build samsung\]/
+
+      <<: *default_android
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane android release store:samsung
+
+    - stage: 'Build'
+      name: 'Android GooglePay Build'
+      if: commit_message ~= /\[build googlepay\]/
+      <<: *default_android
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane android googlepay
+
+    - stage: 'Build'
+      name: 'Android GooglePay Build (staging)'
+      if: commit_message ~= /\[build googlepay-stg\]/
+      <<: *default_android
+      script:
+        - ./scripts/background.sh &
+        - bundle exec fastlane android googlepay env:stg
+
